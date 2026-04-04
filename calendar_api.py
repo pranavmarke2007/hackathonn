@@ -199,3 +199,33 @@ def get_multi_user_availability(date, participants):
             })
 
     return result
+# =========================
+# 👥 COMMON SLOT + BEST SLOT
+# =========================
+def find_common_slots(date, participants):
+    data = get_multi_user_availability(date, participants)
+
+    common = []
+
+    for hour in range(9, 18):
+        all_free = True
+
+        for user in participants:
+            if data[user][hour - 9]["status"] == "busy":
+                all_free = False
+                break
+
+        if all_free:
+            common.append(hour)
+
+    return common
+
+
+def suggest_best_slot(common):
+    if not common:
+        return None
+
+    # prefer 11 AM – 2 PM
+    preferred = [h for h in common if 11 <= h <= 14]
+
+    return preferred[0] if preferred else common[0]

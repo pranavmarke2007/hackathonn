@@ -5,10 +5,11 @@ from calendar_api import (
 )
 from db import emails_collection
 from email_sender import send_email
-
+from calendar_api import find_common_slots, suggest_best_slot
 import dateparser
 import re
 import pytz
+from datetime import datetime
 from config import DEFAULT_TIMEZONE
 
 from googleapiclient.discovery import build
@@ -18,6 +19,18 @@ from google_auth_oauthlib.flow import Flow
 import os
 
 os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
+
+def extract_emails(text):
+    return re.findall(r'[\w\.-]+@[\w\.-]+', text)
+
+
+def is_team_meeting(text):
+    return "team" in text.lower() or "everyone" in text.lower()
+
+
+def is_reschedule(text):
+    return "reschedule" in text.lower() or "another time" in text.lower()
+
 
 app = Flask(__name__)
 app.secret_key = "supersecret"
@@ -202,7 +215,11 @@ meeting_keywords = [
 ]
 
 def is_meeting_related(text):
-    return any(word in text.lower() for word in meeting_keywords)
+    patterns = [
+        r'\bmeet\b', r'\bschedule\b', r'\bcall\b',
+        r'\bavailable\b', r'\bdiscussion\b'
+    ]
+    return any(re.search(p, text.lower()) for p in patterns)
 
 def is_ambiguous(text):
     return not re.search(r'\b\d{1,2}[:\s]?\d{0,2}\s*(am|pm)\b', text.lower())
@@ -225,6 +242,66 @@ def get_all_emails():
         body = mail["body"]
         sender = mail["from"]
         mail_id = mail["id"]
+
+        # 🔥 MULTI PARTICIPANT LOGIC
+        participants = extract_emails(body)
+
+        if is_team_meeting(body) and participants:
+
+            date = datetime.now(IST).strftime("%Y-%m-%d")
+
+            common = find_common_slots(date, participants)
+            best = suggest_best_slot(common)
+
+            if best:
+                send_email(
+                    sender,
+                    "Team Meeting Suggestion",
+                    f"""
+Hi,
+
+Best common slot for all participants:
+
+👉 {best}:00
+
+Please confirm.
+
+AI Scheduler
+"""
+                )
+
+                mail["status"] = f"🤖 Suggested {best}:00"
+                continue
+
+        # 🔁 RESCHEDULE CASE
+        if is_reschedule(body) and participants:
+
+            date = datetime.now(IST).strftime("%Y-%m-%d")
+
+            common = find_common_slots(date, participants)
+            best = suggest_best_slot(common)
+
+            if best:
+                send_email(
+                    sender,
+                    "Rescheduled Meeting",
+                    f"""
+Hi,
+
+New suggested time:
+
+👉 {best}:00
+
+AI Scheduler
+"""
+                )
+
+                mail["status"] = f"🔁 Rescheduled {best}:00"
+                continue
+
+        # =========================
+        # EXISTING LOGIC (UNCHANGED)
+        # =========================
 
         existing = get_email_state(mail_id)
         if existing:
@@ -283,15 +360,15 @@ def get_all_emails():
                     "Requested Slot Not Available",
                     f"""Hi,
 
-                    The time you requested is already booked.
+The time you requested is already booked.
 
-                    Here are some available alternatives:
-                    {alt_text}
+Here are some available alternatives:
+{alt_text}
 
-                    Please reply with your preferred time.
+Please reply with your preferred time.
 
-                    Best,
-                    AI Scheduler"""
+Best,
+AI Scheduler"""
                 )
 
             else:
