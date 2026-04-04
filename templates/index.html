@@ -5,9 +5,11 @@
     <title>Inbox AI</title>
 
     <style>
+        * { box-sizing: border-box; }
+
         body {
             margin: 0;
-            font-family: 'Segoe UI';
+            font-family: 'Segoe UI', sans-serif;
             background: #f5f7ff;
         }
 
@@ -18,13 +20,10 @@
             align-items: center;
             padding: 15px 40px;
             background: white;
-            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
+            box-shadow: 0 2px 10px rgba(0,0,0,0.05);
         }
 
-        .logo {
-            font-size: 20px;
-            font-weight: bold;
-        }
+        .logo { font-size: 20px; font-weight: bold; }
 
         .auth a {
             margin-left: 10px;
@@ -33,41 +32,13 @@
             text-decoration: none;
         }
 
-        .login {
-            border: 1px solid #ccc;
-            color: black;
-        }
-
-        .signup {
-            background: #4f46e5;
-            color: white;
-        }
+        .login { border: 1px solid #ccc; color: black; }
+        .signup { background: #4f46e5; color: white; }
 
         /* HERO */
-        .hero {
-            text-align: center;
-            padding: 80px 20px;
-        }
-
-        .hero h1 {
-            font-size: 40px;
-            color: #1e3a8a;
-        }
-
-        .hero p {
-            color: #555;
-            margin-top: 10px;
-        }
-
-        .hero button {
-            margin-top: 20px;
-            padding: 10px 20px;
-            background: #4f46e5;
-            color: white;
-            border: none;
-            border-radius: 8px;
-            cursor: pointer;
-        }
+        .hero { text-align: center; padding: 80px 20px; }
+        .hero h1 { font-size: 40px; color: #1e3a8a; }
+        .hero p { color: #555; margin-top: 10px; }
 
         /* APP */
         .app {
@@ -76,12 +47,31 @@
             flex-direction: column;
         }
 
+        .body-row {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+        }
+
         .sidebar {
             width: 220px;
             background: linear-gradient(180deg, #4f46e5, #6366f1);
             color: white;
             padding: 20px;
+            flex-shrink: 0;
         }
+
+        .sidebar h2 { margin-top: 0; }
+
+        .sidebar-item {
+            padding: 10px;
+            border-radius: 8px;
+            cursor: pointer;
+            margin-bottom: 5px;
+            transition: background 0.2s;
+        }
+
+        .sidebar-item:hover { background: rgba(255,255,255,0.2); }
 
         .main {
             flex: 1;
@@ -89,65 +79,148 @@
             grid-template-columns: 2fr 1fr;
             gap: 20px;
             padding: 20px;
+            overflow-y: auto;
         }
 
         .card {
             background: white;
             border-radius: 12px;
             padding: 20px;
-            box-shadow: 0 5px 20px rgba(0, 0, 0, 0.08);
+            box-shadow: 0 5px 20px rgba(0,0,0,0.08);
+        }
+
+        /* CALENDAR */
+        .cal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+
+        .cal-header button {
+            background: #4f46e5;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            padding: 4px 10px;
+            cursor: pointer;
+        }
+
+        .cal-days-header {
+            display: grid;
+            grid-template-columns: repeat(7, 1fr);
+            gap: 4px;
+            margin-bottom: 4px;
+        }
+
+        .cal-days-header span {
+            text-align: center;
+            font-size: 11px;
+            color: #888;
+            font-weight: bold;
         }
 
         .calendar {
             display: grid;
             grid-template-columns: repeat(7, 1fr);
-            gap: 5px;
+            gap: 4px;
         }
 
         .day {
-            padding: 8px;
+            padding: 7px 4px;
             text-align: center;
             border-radius: 6px;
             cursor: pointer;
+            font-size: 13px;
+            transition: transform 0.1s;
         }
+
+        .day:hover { transform: scale(1.1); }
 
         .selected {
-            background: #4f46e5;
-            color: white;
+            background: #4f46e5 !important;
+            color: white !important;
+            font-weight: bold;
         }
 
+        /* SLOTS */
         .slot-btn {
             display: block;
-            padding: 8px;
+            width: 100%;
+            padding: 8px 12px;
             margin: 6px 0;
             border: none;
             border-radius: 6px;
             color: white;
+            cursor: pointer;
+            text-align: left;
+            font-size: 14px;
+            transition: opacity 0.2s;
         }
 
+        .slot-btn:hover { opacity: 0.85; }
+
+        .slot-btn.best-slot {
+            border: 3px solid gold;
+            font-weight: bold;
+        }
+
+        /* INBOX */
         .msg {
             background: #eef2ff;
-            padding: 10px;
+            padding: 12px;
             margin: 8px 0;
             border-radius: 8px;
+            border-left: 4px solid #4f46e5;
+        }
+
+        .msg .sender { font-weight: bold; font-size: 14px; }
+        .msg .subject { color: #444; font-size: 13px; margin: 2px 0; }
+        .msg .body-text { color: #666; font-size: 12px; margin: 4px 0; }
+        .msg .status { font-size: 13px; color: #4f46e5; margin-top: 4px; }
+        .msg .tag {
+            display: inline-block;
+            background: #e0e7ff;
+            color: #4f46e5;
+            border-radius: 10px;
+            padding: 1px 8px;
+            font-size: 11px;
+            margin-left: 6px;
+        }
+
+        .load-btn {
+            background: #4f46e5;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            padding: 8px 16px;
+            cursor: pointer;
+            font-size: 14px;
+            margin-bottom: 10px;
+        }
+
+        .load-btn:hover { background: #4338ca; }
+
+        #loading-msg {
+            color: #888;
+            font-style: italic;
+            font-size: 13px;
+            margin: 8px 0;
         }
     </style>
 </head>
 
 <body>
 
-    <!-- 🔥 SAFE VARIABLE HANDLING -->
     <script>
-        let isLoggedIn = {{ logged_in| tojson }};
-        let userEmail = {{ user_email| tojson }};
+        let isLoggedIn = {{ logged_in|tojson }};
+        let userEmail = {{ user_email|tojson }};
     </script>
 
     <!-- LANDING -->
     <div id="landing">
-
         <div class="navbar">
             <div class="logo">🤖 Inbox AI</div>
-
             <div class="auth">
                 <a href="/login" class="login">Login</a>
                 <a href="/login" class="signup">Sign Up</a>
@@ -157,20 +230,17 @@
         <div class="hero">
             <h1>Smart Email Scheduling</h1>
             <p>Let AI handle your meeting scheduling automatically</p>
-
             <a href="/login" style="
                 display:inline-block;
                 margin-top:20px;
-                padding:10px 20px;
+                padding:12px 28px;
                 background:#4f46e5;
                 color:white;
                 border-radius:8px;
                 text-decoration:none;
-            ">
-                Start with Google →
-            </a>
+                font-size:16px;
+            ">Start with Google →</a>
         </div>
-
     </div>
 
     <!-- APP -->
@@ -184,73 +254,71 @@
             padding:10px 20px;
             background:white;
             box-shadow:0 2px 10px rgba(0,0,0,0.05);
-            ">
-
-            <div style="font-weight:bold;">🤖 Inbox AI</div>
+            flex-shrink:0;
+        ">
+            <div style="font-weight:bold;font-size:18px;">🤖 Inbox AI</div>
 
             <div style="display:flex;align-items:center;gap:10px;">
-
                 <div id="avatar" style="
-                    width:35px;
-                    height:35px;
-                    border-radius:50%;
-                    background:#4f46e5;
-                    color:white;
-                    display:flex;
-                    align-items:center;
-                    justify-content:center;
-                    font-weight:bold;
-                    "></div>
-
-                <div id="emailText" style="font-size:14px;"></div>
-
+                    width:35px;height:35px;border-radius:50%;
+                    background:#4f46e5;color:white;
+                    display:flex;align-items:center;justify-content:center;
+                    font-weight:bold;font-size:16px;
+                "></div>
+                <div id="emailText" style="font-size:14px;color:#444;"></div>
                 <a href="/logout" style="
-                    margin-left:10px;
-                    padding:5px 10px;
-                    border-radius:6px;
-                    background:#ef4444;
-                    color:white;
-                    text-decoration:none;
-                    ">Logout</a>
-
+                    padding:5px 12px;border-radius:6px;
+                    background:#ef4444;color:white;text-decoration:none;
+                    font-size:13px;
+                ">Logout</a>
             </div>
         </div>
 
-        <div style="display:flex; flex:1;">
+        <div class="body-row">
 
             <div class="sidebar">
                 <h2>🤖 Inbox AI</h2>
-                <div onclick="loadInbox()">📥 Inbox</div>
+                <div class="sidebar-item" onclick="loadInbox()">📥 Inbox</div>
             </div>
 
             <div class="main">
 
+                <!-- INBOX CARD -->
                 <div class="card">
-                    <h2>Inbox</h2>
-                    <button onclick="loadInbox()">Load Inbox</button>
+                    <h2 style="margin-top:0;">📥 Inbox</h2>
+                    <button class="load-btn" onclick="loadInbox()">🔄 Load Inbox</button>
+                    <div id="loading-msg"></div>
                     <div id="chat"></div>
                 </div>
 
+                <!-- CALENDAR CARD -->
                 <div class="card">
-                    <h3>Calendar</h3>
-                    <div id="month"></div>
+                    <h3 style="margin-top:0;">📅 Calendar</h3>
+
+                    <div class="cal-header">
+                        <button onclick="changeMonth(-1)">‹</button>
+                        <div id="month" style="font-weight:bold;"></div>
+                        <button onclick="changeMonth(1)">›</button>
+                    </div>
+
+                    <div class="cal-days-header">
+                        <span>Su</span><span>Mo</span><span>Tu</span>
+                        <span>We</span><span>Th</span><span>Fr</span><span>Sa</span>
+                    </div>
+
                     <div id="calendar" class="calendar"></div>
 
-                    <h3>Slots</h3>
-                    <div id="slots">Click a date</div>
+                    <h3>🕐 Time Slots</h3>
+                    <div id="slots" style="color:#888;font-size:13px;">Click a date to view slots</div>
                 </div>
 
             </div>
-
         </div>
-
     </div>
 
     <script>
 
-        // 🔥 RUN AFTER DOM LOAD
         window.onload = function () {
-
             if (isLoggedIn) {
                 document.getElementById("landing").style.display = "none";
                 document.getElementById("app").style.display = "flex";
@@ -264,119 +332,224 @@
                 renderCalendar();
             } else {
                 document.getElementById("landing").style.display = "block";
+                document.getElementById("app").style.display = "none";
             }
-
         };
 
-        // EXISTING CODE
-
-        function enterApp() {
-            document.getElementById("landing").style.display = "none";
-            document.getElementById("app").style.display = "flex";
-            renderCalendar();
-        }
+        // ========================
+        // CALENDAR
+        // ========================
 
         let current = new Date();
         let selectedEl = null;
 
+        function changeMonth(dir) {
+            current.setMonth(current.getMonth() + dir);
+            renderCalendar();
+        }
+
         function formatDate(y, m, d) {
-            return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+            return `${y}-${String(m).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
         }
 
         function renderCalendar() {
-            let cal = document.getElementById("calendar");
-            let month = document.getElementById("month");
+            const cal = document.getElementById("calendar");
+            const monthLabel = document.getElementById("month");
 
-            cal.innerHTML = "";
-            month.innerText = current.toLocaleString('default', { month: 'long', year: 'numeric' });
+            cal.innerHTML = "<div style='color:#888;font-size:12px;grid-column:1/-1;'>Loading...</div>";
+            monthLabel.innerText = current.toLocaleString('default', { month: 'long', year: 'numeric' });
 
-            let y = current.getFullYear();
-            let m = current.getMonth();
+            const y = current.getFullYear();
+            const m = current.getMonth(); // 0-indexed
 
             fetch(`/month_overview/${y}/${m + 1}`)
-                .then(res => res.json())
+                .then(res => {
+                    if (!res.ok) throw new Error("Server error " + res.status);
+                    return res.json();
+                })
                 .then(busyDays => {
+                    cal.innerHTML = "";
 
-                    let first = new Date(y, m, 1).getDay();
-                    let days = new Date(y, m + 1, 0).getDate();
+                    const firstDay = new Date(y, m, 1).getDay();
+                    const totalDays = new Date(y, m + 1, 0).getDate();
+                    const today = new Date();
 
-                    for (let i = 0; i < first; i++) cal.innerHTML += "<div></div>";
+                    // Empty cells before first day
+                    for (let i = 0; i < firstDay; i++) {
+                        cal.innerHTML += "<div></div>";
+                    }
 
-                    for (let d = 1; d <= days; d++) {
-                        let dateStr = formatDate(y, m + 1, d);
-
-                        let div = document.createElement("div");
+                    for (let d = 1; d <= totalDays; d++) {
+                        const dateStr = formatDate(y, m + 1, d);
+                        const div = document.createElement("div");
                         div.className = "day";
                         div.innerText = d;
 
-                        div.style.background = busyDays.includes(d) ? "#fecaca" : "#bbf7d0";
+                        const isBusy = busyDays.includes(d);
+                        const isToday = (today.getFullYear() === y && today.getMonth() === m && today.getDate() === d);
+
+                        if (isToday) {
+                            div.style.outline = "2px solid #4f46e5";
+                        }
+
+                        div.style.background = isBusy ? "#fecaca" : "#bbf7d0";
+                        div.style.color = isBusy ? "#991b1b" : "#166534";
 
                         div.onclick = () => {
                             if (selectedEl) selectedEl.classList.remove("selected");
                             div.classList.add("selected");
                             selectedEl = div;
-                            loadSlots(dateStr);
-                        }
+                            loadSlots(dateStr, y, m + 1, d);
+                        };
 
                         cal.appendChild(div);
                     }
+                })
+                .catch(err => {
+                    cal.innerHTML = "<div style='color:red;font-size:12px;grid-column:1/-1;'>Failed to load calendar</div>";
+                    console.error("Calendar error:", err);
                 });
         }
 
-        async function loadSlots(date) {
-            let res = await fetch(`/day_slots/${date}`);
-            let data = await res.json();
+        // ========================
+        // SLOTS
+        // ========================
 
-            let slotDiv = document.getElementById("slots");
-            slotDiv.innerHTML = "";
+        async function loadSlots(dateStr, y, m, d) {
+            const slotDiv = document.getElementById("slots");
+            slotDiv.innerHTML = "<div style='color:#888;font-size:12px;'>Loading slots...</div>";
 
-            let best = null;
+            try {
+                const res = await fetch(`/day_slots/${dateStr}`);
+                if (!res.ok) throw new Error("Server error " + res.status);
+                const data = await res.json();
 
-            data.forEach(s => {
-                let btn = document.createElement("button");
-                btn.className = "slot-btn";
-                btn.innerText = s.display;
+                slotDiv.innerHTML = "";
 
-                if (s.status === "busy") {
-                    btn.style.background = "#ef4444";
-                } else {
-                    btn.style.background = "#22c55e";
-                    if (!best) best = btn;
+                if (!data || data.length === 0) {
+                    slotDiv.innerHTML = "<div style='color:#888;font-size:13px;'>No slots available</div>";
+                    return;
                 }
 
-                btn.onclick = () => {
-                    fetch("/book_slot", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ time: s.time })
-                    }).then(() => alert("Booked!"));
-                }
+                let firstFreeBtn = null;
 
-                slotDiv.appendChild(btn);
-            });
+                data.forEach((s, idx) => {
+                    const btn = document.createElement("button");
+                    btn.className = "slot-btn";
+                    btn.innerText = s.status === "busy" ? `🔴 ${s.display}` : `🟢 ${s.display}`;
 
-            if (best) best.style.border = "3px solid gold";
+                    if (s.status === "busy") {
+                        btn.style.background = "#ef4444";
+                        btn.disabled = true;
+                        btn.style.opacity = "0.7";
+                        btn.style.cursor = "not-allowed";
+                    } else {
+                        btn.style.background = "#22c55e";
+
+                        // Build ISO datetime string for booking
+                        const hour = 9 + idx; // slots start at 9am
+                        const isoTime = `${y}-${String(m).padStart(2,'0')}-${String(d).padStart(2,'0')}T${String(hour).padStart(2,'0')}:00:00`;
+
+                        btn.onclick = () => bookSlot(isoTime, btn);
+
+                        if (!firstFreeBtn) firstFreeBtn = btn;
+                    }
+
+                    slotDiv.appendChild(btn);
+                });
+
+                if (firstFreeBtn) firstFreeBtn.classList.add("best-slot");
+
+            } catch (e) {
+                slotDiv.innerHTML = "<div style='color:red;font-size:13px;'>Failed to load slots</div>";
+                console.error("Slots error:", e);
+            }
         }
 
+        async function bookSlot(isoTime, btn) {
+            btn.innerText = "⏳ Booking...";
+            btn.disabled = true;
+
+            try {
+                const res = await fetch("/book_slot", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ time: isoTime })
+                });
+
+                const data = await res.json();
+
+                if (data.status === "booked") {
+                    btn.innerText = "✅ Booked!";
+                    btn.style.background = "#4f46e5";
+                    renderCalendar(); // refresh calendar to show new busy day
+                } else {
+                    btn.innerText = "❌ Failed";
+                    btn.style.background = "#ef4444";
+                    btn.disabled = false;
+                }
+            } catch (e) {
+                btn.innerText = "❌ Error";
+                btn.style.background = "#ef4444";
+                btn.disabled = false;
+                console.error("Book error:", e);
+            }
+        }
+
+        // ========================
+        // INBOX
+        // ========================
+
         async function loadInbox() {
-            let res = await fetch('/emails');
-            let data = await res.json();
+            const chat = document.getElementById("chat");
+            const loadingMsg = document.getElementById("loading-msg");
 
-            let chat = document.getElementById("chat");
             chat.innerHTML = "";
+            loadingMsg.innerText = "⏳ Loading emails...";
 
-            data.forEach(m => {
-                chat.innerHTML += `
-        <div class="msg">
-            <b>${m.from}</b> ${m.tag || ""}
-            <div>${m.body}</div>
-            <div>${m.status}</div>
-        </div>`;
-            });
+            try {
+                const res = await fetch('/emails');
+                if (!res.ok) throw new Error("Server error " + res.status);
+                const data = await res.json();
+
+                loadingMsg.innerText = "";
+
+                if (!data || data.length === 0) {
+                    chat.innerHTML = "<div style='color:#888;'>No emails found</div>";
+                    return;
+                }
+
+                data.forEach(m => {
+                    const div = document.createElement("div");
+                    div.className = "msg";
+                    div.innerHTML = `
+                        <div class="sender">
+                            ${escapeHtml(m.from || '')}
+                            ${m.tag ? `<span class="tag">${escapeHtml(m.tag)}</span>` : ''}
+                        </div>
+                        ${m.subject ? `<div class="subject">📌 ${escapeHtml(m.subject)}</div>` : ''}
+                        <div class="body-text">${escapeHtml(m.body || '')}</div>
+                        <div class="status">${escapeHtml(m.status || '')}</div>
+                    `;
+                    chat.appendChild(div);
+                });
+
+            } catch (e) {
+                loadingMsg.innerText = "❌ Failed to load emails";
+                console.error("Inbox error:", e);
+            }
+        }
+
+        function escapeHtml(str) {
+            if (!str) return '';
+            return str
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;");
         }
 
     </script>
 
 </body>
-
 </html>

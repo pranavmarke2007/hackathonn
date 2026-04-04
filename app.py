@@ -1,15 +1,16 @@
 from flask import Flask, jsonify, render_template, request, redirect, session
 from calendar_api import (
     check_availability, create_event, get_day_slots,
-    suggest_alternatives, get_multi_user_availability
+    suggest_alternatives, get_multi_user_availability,
+    find_common_slots, suggest_best_slot
 )
 from db import emails_collection
 from email_sender import send_email
-from calendar_api import find_common_slots, suggest_best_slot
+
 import dateparser
 import re
 import pytz
-from datetime import datetime
+from datetime import datetime, timedelta
 from config import DEFAULT_TIMEZONE
 
 from googleapiclient.discovery import build
@@ -19,6 +20,11 @@ from google_auth_oauthlib.flow import Flow
 import os
 
 os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
+
+
+# =========================
+# 🔧 HELPERS
+# =========================
 
 def extract_emails(text):
     return re.findall(r'[\w\.-]+@[\w\.-]+', text)
@@ -50,39 +56,25 @@ flow = Flow.from_client_secrets_file(
     redirect_uri="http://localhost:5000/callback"
 )
 
+
 # =========================
-# 🔑 LOGIN ROUTES
+# 🔑 LOGIN
 # =========================
 
 @app.route("/login")
 def login():
     session.clear()
-
     auth_url, _ = flow.authorization_url(
         prompt='consent select_account',
         access_type='offline',
         include_granted_scopes='true'
     )
-
     return redirect(auth_url)
 
-
-@app.route("/user_info")
-def user_info():
-    if "credentials" in session:
-        return jsonify({
-            "logged_in": True,
-            "email": get_my_email(session["credentials"])
-        })
-    return jsonify({
-        "logged_in": False,
-        "email": ""
-    })
 
 @app.route("/callback")
 def callback():
     flow.fetch_token(authorization_response=request.url)
-
     credentials = flow.credentials
 
     session["credentials"] = {
@@ -96,10 +88,12 @@ def callback():
 
     return redirect("/")
 
+
 @app.route("/logout")
 def logout():
     session.clear()
     return redirect("/")
+
 
 @app.route("/")
 def home():
@@ -108,8 +102,19 @@ def home():
         return render_template("index.html", logged_in=True, user_email=email)
     return render_template("index.html", logged_in=False, user_email=None)
 
+
+@app.route("/user_info")
+def user_info():
+    if "credentials" in session:
+        return jsonify({
+            "logged_in": True,
+            "email": get_my_email(session["credentials"])
+        })
+    return jsonify({"logged_in": False, "email": ""})
+
+
 # =========================
-# 🔥 GMAIL HELPERS
+# 📧 GMAIL
 # =========================
 
 def get_gmail_service(creds_dict):
@@ -122,22 +127,21 @@ def get_my_email(creds_dict):
     profile = service.users().getProfile(userId='me').execute()
     return profile.get("emailAddress")
 
-from googleapiclient.discovery import build
-from google.oauth2.credentials import Credentials
+
 def get_user_email():
     creds = Credentials(**session["credentials"])
     service = build("gmail", "v1", credentials=creds)
     profile = service.users().getProfile(userId='me').execute()
     return profile.get("emailAddress")
 
+
 def fetch_emails_from_gmail(creds_dict):
     service = get_gmail_service(creds_dict)
-
     my_email = get_my_email(creds_dict)
 
     results = service.users().messages().list(
         userId='me',
-        labelIds=['INBOX'],   # ✅ only inbox
+        labelIds=['INBOX'],
         maxResults=10
     ).execute()
 
@@ -154,20 +158,15 @@ def fetch_emails_from_gmail(creds_dict):
         headers = data["payload"]["headers"]
 
         subject = ""
-        sender = ""
         sender_email = ""
 
         for h in headers:
             if h["name"] == "Subject":
                 subject = h["value"]
-
             if h["name"] == "From":
-                sender = h["value"]
+                match = re.search(r'<(.+?)>', h["value"])
+                sender_email = match.group(1) if match else h["value"]
 
-                match = re.search(r'<(.+?)>', sender)
-                sender_email = match.group(1) if match else sender
-
-        # ❌ skip own emails
         if sender_email.lower() == my_email.lower():
             continue
 
@@ -182,7 +181,7 @@ def fetch_emails_from_gmail(creds_dict):
 
 
 # =========================
-# 🔥 DB HELPERS
+# 📦 DB
 # =========================
 
 def get_email_state(mail_id):
@@ -192,117 +191,113 @@ def get_email_state(mail_id):
 def save_email_state(mail_id, status, alternatives, tag):
     emails_collection.update_one(
         {"mail_id": mail_id},
-        {
-            "$set": {
-                "status": status,
-                "alternatives": alternatives,
-                "tag": tag
-            }
-        },
+        {"$set": {"status": status, "alternatives": alternatives, "tag": tag}},
         upsert=True
     )
 
 
 # =========================
-# 🔥 BETTER KEYWORDS
+# 🧠 NLP
 # =========================
 
-meeting_keywords = [
-    "meeting", "schedule", "call",
-    "discussion", "meet", "availability",
-    "available", "slot", "time", "reschedule",
-    "confirm", "join"
-]
-
 def is_meeting_related(text):
-    patterns = [
-        r'\bmeet\b', r'\bschedule\b', r'\bcall\b',
-        r'\bavailable\b', r'\bdiscussion\b'
-    ]
-    return any(re.search(p, text.lower()) for p in patterns)
+    return any(word in text.lower() for word in [
+        "meeting", "schedule", "call", "discussion", "availability",
+        "available", "slot", "time", "confirm", "join"
+    ])
+
 
 def is_ambiguous(text):
     return not re.search(r'\b\d{1,2}[:\s]?\d{0,2}\s*(am|pm)\b', text.lower())
 
 
 # =========================
-# 🔥 EMAIL PROCESSING
+# 📬 MAIN EMAIL ROUTE
 # =========================
 
 @app.route("/emails")
 def get_all_emails():
 
-    creds = session.get("credentials")
-    if not creds:
+    if "credentials" not in session:
         return jsonify([])
 
-    emails = fetch_emails_from_gmail(creds)
+    try:
+        creds = session["credentials"]
+        emails = fetch_emails_from_gmail(creds)
+    except Exception as e:
+        print("Error fetching emails:", e)
+        return jsonify([])
 
     for mail in emails:
         body = mail["body"]
         sender = mail["from"]
         mail_id = mail["id"]
 
-        # 🔥 MULTI PARTICIPANT LOGIC
         participants = extract_emails(body)
 
-        if is_team_meeting(body) and participants:
-
-            date = datetime.now(IST).strftime("%Y-%m-%d")
-
-            common = find_common_slots(date, participants)
-            best = suggest_best_slot(common)
-
-            if best:
-                send_email(
-                    sender,
-                    "Team Meeting Suggestion",
-                    f"""
-Hi,
-
-Best common slot for all participants:
-
-👉 {best}:00
-
-Please confirm.
-
-AI Scheduler
-"""
-                )
-
-                mail["status"] = f"🤖 Suggested {best}:00"
-                continue
-
-        # 🔁 RESCHEDULE CASE
-        if is_reschedule(body) and participants:
-
-            date = datetime.now(IST).strftime("%Y-%m-%d")
-
-            common = find_common_slots(date, participants)
-            best = suggest_best_slot(common)
-
-            if best:
-                send_email(
-                    sender,
-                    "Rescheduled Meeting",
-                    f"""
-Hi,
-
-New suggested time:
-
-👉 {best}:00
-
-AI Scheduler
-"""
-                )
-
-                mail["status"] = f"🔁 Rescheduled {best}:00"
-                continue
+        # Add self to participants
+        try:
+            me = get_user_email()
+            if me not in participants:
+                participants.append(me)
+        except Exception as e:
+            print("Could not get user email:", e)
 
         # =========================
-        # EXISTING LOGIC (UNCHANGED)
+        # 👥 TEAM MEETING
         # =========================
+        if is_team_meeting(body) and len(participants) > 1:
+            try:
+                date = datetime.now(IST).strftime("%Y-%m-%d")
+                common = find_common_slots(date, participants)
+                best = suggest_best_slot(common)
 
+                if best:
+                    send_email(
+                        sender,
+                        "Team Meeting Suggestion",
+                        f"Hi,\n\nBest common slot for all participants:\n\n👉 {best}:00\n\nPlease confirm.\n\nAI Scheduler"
+                    )
+                    mail["status"] = f"🤖 Suggested {best}:00"
+                    mail["tag"] = "📅 Meeting"
+                else:
+                    mail["status"] = "❌ No common slot found"
+                    mail["tag"] = "📅 Meeting"
+            except Exception as e:
+                print("Team meeting error:", e)
+                mail["status"] = "⚠️ Team meeting error"
+                mail["tag"] = "📅 Meeting"
+            continue
+
+        # =========================
+        # 🔁 RESCHEDULE
+        # =========================
+        if is_reschedule(body) and len(participants) > 1:
+            try:
+                date = datetime.now(IST).strftime("%Y-%m-%d")
+                common = find_common_slots(date, participants)
+                best = suggest_best_slot(common)
+
+                if best:
+                    send_email(
+                        sender,
+                        "Rescheduled Meeting",
+                        f"Hi,\n\nNew suggested time:\n\n👉 {best}:00\n\nAI Scheduler"
+                    )
+                    mail["status"] = f"🔁 Rescheduled {best}:00"
+                    mail["tag"] = "📅 Meeting"
+                else:
+                    mail["status"] = "❌ No slot for reschedule"
+                    mail["tag"] = "📅 Meeting"
+            except Exception as e:
+                print("Reschedule error:", e)
+                mail["status"] = "⚠️ Reschedule error"
+                mail["tag"] = "📅 Meeting"
+            continue
+
+        # =========================
+        # 🧠 NORMAL FLOW
+        # =========================
         existing = get_email_state(mail_id)
         if existing:
             mail["status"] = existing.get("status", "")
@@ -319,7 +314,7 @@ AI Scheduler
             continue
 
         if is_ambiguous(body):
-            status = "❓ Ambiguous"
+            status = "❓ Ambiguous - no time found"
             save_email_state(mail_id, status, [], tag)
             mail["status"] = status
             continue
@@ -340,60 +335,34 @@ AI Scheduler
 
         meeting_time = IST.localize(meeting_time)
 
-        if check_availability(meeting_time):
-            create_event(meeting_time, attendee_emails=[sender])
-            status = "✅ Scheduled"
-            alternatives = []
-
-        else:
-            alternatives = suggest_alternatives(meeting_time)
-
-            if alternatives:
-                status = "🟡 Busy (Alternatives sent)"
-
-                alt_text = "\n".join(
-                    f"• {a['display']}" for a in alternatives
-                )
-
-                send_email(
-                    sender,
-                    "Requested Slot Not Available",
-                    f"""Hi,
-
-The time you requested is already booked.
-
-Here are some available alternatives:
-{alt_text}
-
-Please reply with your preferred time.
-
-Best,
-AI Scheduler"""
-                )
-
+        try:
+            if check_availability(meeting_time):
+                create_event(meeting_time, attendee_emails=[sender])
+                status = "✅ Scheduled"
+                alternatives = []
             else:
-                status = "🔴 Busy (No alternatives)"
+                alternatives = suggest_alternatives(meeting_time)
+
+                if alternatives:
+                    status = "🟡 Busy (Alternatives sent)"
+                    alt_text = "\n".join(f"• {a['display']}" for a in alternatives)
+                    send_email(
+                        sender,
+                        "Requested Slot Not Available",
+                        f"Hi,\n\nThe time you requested is already booked.\n\nHere are some available alternatives:\n{alt_text}\n\nPlease reply with your preferred time.\n\nBest,\nAI Scheduler"
+                    )
+                else:
+                    status = "🔴 Busy (No alternatives)"
+                    alternatives = []
+        except Exception as e:
+            print("Calendar error:", e)
+            status = "⚠️ Calendar error"
+            alternatives = []
 
         save_email_state(mail_id, status, alternatives, tag)
         mail["status"] = status
 
     return jsonify(emails)
-
-# =========================
-# 👥 MULTI USER
-# =========================
-
-@app.route("/multi_availability/<date>")
-def multi_availability(date):
-    participants = request.args.get("participants")
-
-    if not participants:
-        return jsonify({})
-
-    participants = participants.split(",")
-
-    data = get_multi_user_availability(date, participants)
-    return jsonify(data)
 
 
 # =========================
@@ -402,44 +371,111 @@ def multi_availability(date):
 
 @app.route("/day_slots/<date>")
 def day_slots(date):
-    creds = session.get("credentials")
-    return jsonify(get_day_slots(date))
+    if "credentials" not in session:
+        return jsonify([])
+    try:
+        return jsonify(get_day_slots(date))
+    except Exception as e:
+        print("Day slots error:", e)
+        return jsonify([])
+
+
+# =========================
+# 📅 MONTH OVERVIEW  ← was missing / broken indentation
+# =========================
 
 @app.route("/month_overview/<year>/<month>")
 def month_overview(year, month):
-    from datetime import datetime, timedelta
+    if "credentials" not in session:
+        return jsonify([])
 
-    year = int(year)
-    month = int(month)
+    try:
+        year = int(year)
+        month = int(month)
 
-    start = IST.localize(datetime(year, month, 1))
-    end = start + timedelta(days=31)
+        start = IST.localize(datetime(year, month, 1))
+        end = start + timedelta(days=31)
 
-    service = build("calendar", "v3", credentials=Credentials(**session["credentials"]))
+        service = build(
+            "calendar", "v3",
+            credentials=Credentials(**session["credentials"])
+        )
 
-    events = service.events().list(
-        calendarId='primary',
-        timeMin=start.isoformat(),
-        timeMax=end.isoformat(),
-        singleEvents=True
-    ).execute().get('items', [])
+        events = service.events().list(
+            calendarId='primary',
+            timeMin=start.isoformat(),
+            timeMax=end.isoformat(),
+            singleEvents=True
+        ).execute().get('items', [])
 
-    busy_days = set()
+        busy_days = set()
 
-    for e in events:
-        s = e['start'].get('dateTime')
-        if not s:
-            continue
-        d = datetime.fromisoformat(s).astimezone(IST).day
-        busy_days.add(d)
+        for e in events:
+            s = e['start'].get('dateTime')
+            if not s:
+                # all-day event
+                s = e['start'].get('date')
+                if s:
+                    d = int(s.split('-')[2])
+                    busy_days.add(d)
+                continue
+            d = datetime.fromisoformat(s).astimezone(IST).day
+            busy_days.add(d)
 
-    return jsonify(list(busy_days))
-    @app.route("/book_slot", methods=["POST"])
-    def book_slot():
+        return jsonify(list(busy_days))
+
+    except Exception as e:
+        print("Month overview error:", e)
+        return jsonify([])
+
+
+# =========================
+# 📌 BOOK SLOT  ← was missing in new app.py
+# =========================
+
+@app.route("/book_slot", methods=["POST"])
+def book_slot():
+    if "credentials" not in session:
+        return jsonify({"status": "error", "message": "Not logged in"}), 401
+
+    try:
         data = request.json
-        dt = datetime.fromisoformat(data["time"])
+        time_str = data.get("time")
+
+        if not time_str:
+            return jsonify({"status": "error", "message": "No time provided"}), 400
+
+        dt = IST.localize(datetime.fromisoformat(time_str))
         create_event(dt)
         return jsonify({"status": "booked"})
+
+    except Exception as e:
+        print("Book slot error:", e)
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+# =========================
+# 👥 MULTI USER
+# =========================
+
+@app.route("/multi_availability/<date>")
+def multi_availability(date):
+    if "credentials" not in session:
+        return jsonify({})
+
+    participants = request.args.get("participants", "")
+    if not participants:
+        return jsonify({})
+
+    try:
+        participants = [p.strip() for p in participants.split(",") if p.strip()]
+        data = get_multi_user_availability(date, participants)
+        return jsonify(data)
+    except Exception as e:
+        print("Multi availability error:", e)
+        return jsonify({})
+
+
 # =========================
 # 🚀 RUN
 # =========================
@@ -447,4 +483,3 @@ def month_overview(year, month):
 if __name__ == "__main__":
     print("🚀 SERVER STARTING...")
     app.run(debug=True, use_reloader=False)
-    
