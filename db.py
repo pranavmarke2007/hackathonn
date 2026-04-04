@@ -1,10 +1,10 @@
-
+import os
+from dotenv import load_dotenv
 from pymongo import MongoClient
 
-client = MongoClient("mongodb+srv://pranavmarke66_db_user:G9Zy2vXLHTBXYftM@cluster0.ny5xzbo.mongodb.net/?appName=Cluster0")
-db = client["ai_scheduler"]
+load_dotenv()
+
+client = MongoClient(os.getenv("MONGO_URI"))
+db = client["pranavmarke"]   # 👈 your DB name here
 
 emails_collection = db["emails"]
-
-# optional but recommended
-emails_collection.create_index("mail_id", unique=True)
