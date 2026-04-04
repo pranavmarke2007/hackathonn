@@ -296,9 +296,9 @@ window.onload = function () {
 // CALENDAR
 // ─────────────────────────────────────────────
 
-let current    = new Date();
-let selectedEl = null;
-let selectedDate = null;   // track which date is selected so we can reload slots
+let current      = new Date();
+let selectedEl   = null;
+let selectedDate = null;
 
 function changeMonth(dir) {
     current.setMonth(current.getMonth() + dir);
@@ -309,11 +309,17 @@ function formatDate(y, m, d) {
     return `${y}-${String(m).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
 }
 
-function renderCalendar() {
+/**
+ * Render the calendar for the current month.
+ * ✅ FIX: accepts an optional callback fired after the fetch completes,
+ * so callers (e.g. loadInbox) can chain slot-loading reliably instead of
+ * guessing a setTimeout delay.
+ */
+function renderCalendar(onComplete) {
     const cal        = document.getElementById("calendar");
     const monthLabel = document.getElementById("month");
 
-    cal.innerHTML = "<div style='color:#888;font-size:12px;grid-column:1/-1;'>Loading...</div>";
+    cal.innerHTML    = "<div style='color:#888;font-size:12px;grid-column:1/-1;'>Loading...</div>";
     monthLabel.innerText = current.toLocaleString('default', { month: 'long', year: 'numeric' });
 
     const y = current.getFullYear();
@@ -331,7 +337,9 @@ function renderCalendar() {
             const totalDays = new Date(y, m + 1, 0).getDate();
             const today     = new Date();
 
-            for (let i = 0; i < firstDay; i++) cal.innerHTML += "<div></div>";
+            for (let i = 0; i < firstDay; i++) {
+                cal.innerHTML += "<div></div>";
+            }
 
             for (let d = 1; d <= totalDays; d++) {
                 const dateStr = formatDate(y, m + 1, d);
@@ -340,9 +348,13 @@ function renderCalendar() {
                 div.innerText = d;
 
                 const isBusy  = busyDays.includes(d);
-                const isToday = (today.getFullYear() === y && today.getMonth() === m && today.getDate() === d);
+                const isToday = (
+                    today.getFullYear() === y &&
+                    today.getMonth()    === m &&
+                    today.getDate()     === d
+                );
 
-                if (isToday)  div.style.outline = "2px solid #4f46e5";
+                if (isToday) div.style.outline = "2px solid #4f46e5";
 
                 div.style.background = isBusy ? "#fecaca" : "#bbf7d0";
                 div.style.color      = isBusy ? "#991b1b" : "#166534";
@@ -358,12 +370,11 @@ function renderCalendar() {
                 cal.appendChild(div);
             }
 
-            // ✅ After re-render, if today is selected, re-select it visually
+            // Re-apply selected highlight after re-render
             if (selectedDate) {
                 const { y: sy, m: sm, d: sd } = selectedDate;
                 if (sy === y && (sm - 1) === m) {
-                    const allDays = cal.querySelectorAll(".day");
-                    allDays.forEach(el => {
+                    cal.querySelectorAll(".day").forEach(el => {
                         if (parseInt(el.innerText) === sd) {
                             el.classList.add("selected");
                             selectedEl = el;
@@ -371,10 +382,14 @@ function renderCalendar() {
                     });
                 }
             }
+
+            // ✅ FIX: fire callback now that DOM is fully built
+            if (typeof onComplete === "function") onComplete();
         })
         .catch(err => {
             cal.innerHTML = "<div style='color:red;font-size:12px;grid-column:1/-1;'>Failed to load calendar</div>";
             console.error("Calendar error:", err);
+            if (typeof onComplete === "function") onComplete();
         });
 }
 
@@ -442,8 +457,8 @@ async function bookSlot(isoTime, btn, dateStr, y, m, d) {
             btn.innerText        = "✅ Booked!";
             btn.style.background = "#4f46e5";
 
-            renderCalendar();
-            setTimeout(() => loadSlots(dateStr, y, m, d), 400);
+            // ✅ Chain: refresh calendar, then reload slots once DOM is ready
+            renderCalendar(() => loadSlots(dateStr, y, m, d));
         } else {
             btn.innerText        = "❌ Failed";
             btn.style.background = "#ef4444";
@@ -466,7 +481,7 @@ async function loadInbox() {
     const chat       = document.getElementById("chat");
     const loadingMsg = document.getElementById("loading-msg");
 
-    chat.innerHTML   = "";
+    chat.innerHTML       = "";
     loadingMsg.innerText = "⏳ Loading emails and checking calendars...";
 
     try {
@@ -476,15 +491,15 @@ async function loadInbox() {
 
         loadingMsg.innerText = "";
 
-        // ✅ Handle new response format: { emails: [...], today: "YYYY-MM-DD" }
-        const emails   = data.emails || data;   // fallback if ever called without wrapper
+        // Handle response format: { emails: [...], today: "YYYY-MM-DD" }
+        const emails   = data.emails || data;
         const todayStr = data.today  || null;
 
         if (!emails || emails.length === 0) {
             chat.innerHTML = "<div style='color:#888;'>No emails found</div>";
         } else {
             emails.forEach(m => {
-                const div    = document.createElement("div");
+                const div     = document.createElement("div");
                 div.className = "msg";
                 div.innerHTML = `
                     <div class="sender">
@@ -499,30 +514,33 @@ async function loadInbox() {
             });
         }
 
-        // ✅ KEY FIX: always refresh the calendar after inbox loads
-        renderCalendar();
-
-        // ✅ KEY FIX: if a team meeting was booked today, auto-select today
-        // and reload its slots so the booked slot turns red immediately
+        // ✅ FIX: If a team meeting was booked today, set today as the selected
+        // date and use the renderCalendar callback to load slots ONLY after the
+        // calendar DOM is fully built — no more fragile setTimeout guesses.
         if (todayStr) {
             const parts = todayStr.split("-");
-            const ty = parseInt(parts[0]);
-            const tm = parseInt(parts[1]);
-            const td = parseInt(parts[2]);
+            const ty    = parseInt(parts[0]);
+            const tm    = parseInt(parts[1]);
+            const td    = parseInt(parts[2]);
 
-            // Navigate calendar to today's month if needed
+            // Navigate to today's month if we're on a different one
             if (current.getFullYear() !== ty || current.getMonth() !== tm - 1) {
                 current = new Date(ty, tm - 1, 1);
             }
 
             selectedDate = { dateStr: todayStr, y: ty, m: tm, d: td };
 
-            // Wait for calendar to re-render before loading slots
-            setTimeout(() => loadSlots(todayStr, ty, tm, td), 600);
+            // ✅ FIX: renderCalendar callback fires after DOM is ready
+            renderCalendar(() => loadSlots(todayStr, ty, tm, td));
+
         } else if (selectedDate) {
             // Fallback: refresh whatever date was already selected
             const { dateStr, y, m: mo, d } = selectedDate;
-            setTimeout(() => loadSlots(dateStr, y, mo, d), 600);
+            renderCalendar(() => loadSlots(dateStr, y, mo, d));
+
+        } else {
+            // No date selected — just refresh the calendar dots
+            renderCalendar();
         }
 
     } catch (e) {

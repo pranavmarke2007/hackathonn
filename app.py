@@ -7,6 +7,7 @@ from calendar_api import (
 from db import emails_collection
 from email_sender import send_email
 
+import threading
 import dateparser
 import re
 import pytz
@@ -68,8 +69,13 @@ def is_ambiguous(text):
     return not re.search(r'\b\d{1,2}[:\s]?\d{0,2}\s*(am|pm)\b', text.lower())
 
 
+def is_notification_sender(sender):
+    no_reply_patterns = ["noreply", "no-reply", "calendar-noreply", "accounts.google"]
+    return any(p in sender.lower() for p in no_reply_patterns)
+
+
 def participants_key(participants):
-    """Canonical sorted key for a set of participants — used for deduplication."""
+    """Canonical sorted key for a set of participants — used for DB deduplication."""
     return "team|" + "|".join(sorted(p.strip().lower() for p in participants if p.strip()))
 
 
@@ -221,8 +227,15 @@ def save_email_state(mail_id, status, alternatives, tag):
         print(f"DB write error: {e}")
 
 
+def delete_email_state(mail_id):
+    """Delete a stale per-email record so it gets reprocessed correctly."""
+    try:
+        emails_collection.delete_one({"mail_id": mail_id})
+    except Exception as e:
+        print(f"DB delete error: {e}")
+
+
 def get_team_state(pkey):
-    """Look up a previously scheduled team meeting by participant key."""
     try:
         return emails_collection.find_one({"mail_id": pkey})
     except Exception as e:
@@ -231,15 +244,14 @@ def get_team_state(pkey):
 
 
 def save_team_state(pkey, status, booked_hour, date_str, tag):
-    """Persist a team meeting so reloading inbox never double-books."""
     try:
         emails_collection.update_one(
             {"mail_id": pkey},
             {"$set": {
-                "status":      status,
-                "booked_hour": booked_hour,
-                "date_str":    date_str,
-                "tag":         tag,
+                "status":       status,
+                "booked_hour":  booked_hour,
+                "date_str":     date_str,
+                "tag":          tag,
                 "alternatives": []
             }},
             upsert=True
@@ -255,47 +267,80 @@ def save_team_state(pkey, status, booked_hour, date_str, tag):
 def _process_single_email(mail, my_email, scheduled_slots):
     """
     Process one email.
-    scheduled_slots: in-memory dict { participants_key → booked_hour }
-    Used as a fast cache within a single inbox load. The real source of
-    truth for deduplication is MongoDB (get_team_state / save_team_state).
+    scheduled_slots: in-memory dict { pkey → {"hour": int, "date_str": str} }
     """
     body    = mail.get("body", "")
     sender  = mail.get("from", "")
     mail_id = mail.get("id", "")
 
-    participants = extract_emails(body)
-    if my_email and my_email not in participants:
-        participants.append(my_email)
+    # Check per-email DB state FIRST to avoid reprocessing.
+    # Exception: if the email is a reschedule that was previously misrouted
+    # as a team booking (status starts with "🤖"), delete the stale record
+    # and fall through to be reprocessed correctly.
+    existing_email = get_email_state(mail_id)
+    if existing_email:
+        saved_status = existing_email.get("status", "")
+        # If this is actually a reschedule email, don't serve the stale team status
+        if is_reschedule(mail.get("body", "")) and saved_status.startswith("🤖"):
+            delete_email_state(mail_id)   # force reprocessing
+        else:
+            mail["status"] = saved_status
+            mail["tag"]    = existing_email.get("tag", "")
+            return
 
-    # ── TEAM MEETING ──────────────────────────────────────────
-    if is_team_meeting(body) and len(participants) > 1:
+    calendar_participants = list(set(extract_emails(body)))
+    if my_email and my_email not in calendar_participants:
+        calendar_participants.append(my_email)
+
+    # ── RESCHEDULE — checked BEFORE team meeting because reschedule emails
+    #    often also contain the word "team" and would be misrouted ─────
+    if is_reschedule(body) and len(calendar_participants) > 1:
         mail["tag"] = "📅 Meeting"
 
-        pkey = participants_key(participants)
+        # base_pkey  → key used for the ORIGINAL booking (to find what slot to avoid)
+        # reschedule_key → separate key so the reschedule is stored independently
+        base_pkey      = participants_key(calendar_participants)
+        reschedule_key = "reschedule|" + base_pkey
 
-        # ── Check in-memory cache first (same request) ──
-        if pkey in scheduled_slots:
-            booked_hour = scheduled_slots[pkey]["hour"]
-            date_str    = scheduled_slots[pkey]["date_str"]
-            mail["status"] = f"🤖 Suggested & Booked {booked_hour}:00 on {date_str}"
-            return
-
-        # ── Check DB (persisted across requests) ──
-        existing = get_team_state(pkey)
-        if existing:
-            booked_hour = existing.get("booked_hour")
-            date_str    = existing.get("date_str", "")
-            status      = existing.get("status", f"🤖 Already booked {booked_hour}:00")
+        # ── in-memory cache: already rescheduled this session ──
+        if reschedule_key in scheduled_slots:
+            booked_hour = scheduled_slots[reschedule_key]["hour"]
+            date_str    = scheduled_slots[reschedule_key]["date_str"]
+            status      = f"🔁 Already rescheduled to {booked_hour}:00 on {date_str}"
             mail["status"] = status
-            # Repopulate in-memory cache so sibling emails don't re-book
-            scheduled_slots[pkey] = {"hour": booked_hour, "date_str": date_str}
+            save_email_state(mail_id, status, [], "📅 Meeting")
             return
 
-        # ── Not yet scheduled — find and book ──
+        # ── DB check: reschedule was persisted in a previous request ──
+        existing_reschedule = get_team_state(reschedule_key)
+        if existing_reschedule:
+            booked_hour = existing_reschedule.get("booked_hour")
+            date_str    = existing_reschedule.get("date_str", "")
+            status      = existing_reschedule.get("status", f"🔁 Already rescheduled to {booked_hour}:00")
+            mail["status"] = status
+            scheduled_slots[reschedule_key] = {"hour": booked_hour, "date_str": date_str}
+            save_email_state(mail_id, status, [], "📅 Meeting")
+            return
+
+        # ── Look up the ORIGINAL booked slot to exclude it ──
+        already_booked = None
+        if base_pkey in scheduled_slots:
+            already_booked = scheduled_slots[base_pkey]["hour"]
+        else:
+            original = get_team_state(base_pkey)
+            if original:
+                already_booked = original.get("booked_hour")
+
+        # ── Not yet rescheduled — find a DIFFERENT common slot ──
         try:
             date_str = datetime.now(IST).strftime("%Y-%m-%d")
-            common   = find_common_slots(date_str, participants)
-            best     = suggest_best_slot(common)
+            common   = find_common_slots(date_str, calendar_participants)
+
+            # Exclude the previously booked slot so we get a different time
+            if already_booked is not None:
+                common = [h for h in common if h != already_booked]
+
+            best = suggest_best_slot(common)
 
             if best:
                 meeting_dt = IST.localize(
@@ -305,85 +350,33 @@ def _process_single_email(mail, my_email, scheduled_slots):
                 )
                 create_event(
                     meeting_dt,
-                    attendee_emails=[p for p in participants if p != my_email]
+                    attendee_emails=[p for p in calendar_participants if p != my_email]
                 )
 
-                send_email(
-                    sender,
-                    "Team Meeting Suggestion",
-                    f"Hi,\n\nBest common slot for all participants:\n\n"
-                    f"👉 {best}:00 on {date_str}\n\n"
-                    f"Meeting has been created in your calendar.\n\nAI Scheduler"
-                )
-
-                status = f"🤖 Suggested & Booked {best}:00"
-                save_team_state(pkey, status, best, date_str, "📅 Meeting")
-                scheduled_slots[pkey] = {"hour": best, "date_str": date_str}
-                mail["status"] = status
-
-            else:
-                status = "❌ No common slot found"
-                save_team_state(pkey, status, None, date_str, "📅 Meeting")
-                mail["status"] = status
-
-        except Exception as e:
-            print(f"Team meeting error: {e}\n{traceback.format_exc()}")
-            mail["status"] = "⚠️ Team scheduling error"
-
-        return
-
-    # ── RESCHEDULE ────────────────────────────────────────────
-    if is_reschedule(body) and len(participants) > 1:
-        mail["tag"] = "📅 Meeting"
-
-        pkey = "reschedule|" + participants_key(participants)
-
-        if pkey in scheduled_slots:
-            booked_hour = scheduled_slots[pkey]["hour"]
-            date_str    = scheduled_slots[pkey]["date_str"]
-            mail["status"] = f"🔁 Already rescheduled to {booked_hour}:00 on {date_str}"
-            return
-
-        existing = get_team_state(pkey)
-        if existing:
-            booked_hour = existing.get("booked_hour")
-            date_str    = existing.get("date_str", "")
-            status      = existing.get("status", f"🔁 Already rescheduled to {booked_hour}:00")
-            mail["status"] = status
-            scheduled_slots[pkey] = {"hour": booked_hour, "date_str": date_str}
-            return
-
-        try:
-            date_str = datetime.now(IST).strftime("%Y-%m-%d")
-            common   = find_common_slots(date_str, participants)
-            best     = suggest_best_slot(common)
-
-            if best:
-                meeting_dt = IST.localize(
-                    datetime.strptime(date_str, "%Y-%m-%d").replace(
-                        hour=best, minute=0, second=0, microsecond=0
+                if not is_notification_sender(sender):
+                    send_email(
+                        sender,
+                        "Rescheduled Meeting",
+                        f"Hi,\n\nYour meeting has been rescheduled.\n\n"
+                        f"New time:\n👉 {best}:00 on {date_str}\n\n"
+                        f"The old slot ({already_booked}:00) has been replaced.\n\nAI Scheduler"
                     )
-                )
-                create_event(
-                    meeting_dt,
-                    attendee_emails=[p for p in participants if p != my_email]
-                )
 
-                send_email(
-                    sender,
-                    "Rescheduled Meeting",
-                    f"Hi,\n\nNew suggested time:\n\n👉 {best}:00 on {date_str}\n\nAI Scheduler"
+                status = (
+                    f"🔁 Rescheduled to {best}:00 (was {already_booked}:00)"
+                    if already_booked else
+                    f"🔁 Rescheduled to {best}:00"
                 )
-
-                status = f"🔁 Rescheduled {best}:00"
-                save_team_state(pkey, status, best, date_str, "📅 Meeting")
-                scheduled_slots[pkey] = {"hour": best, "date_str": date_str}
+                save_team_state(reschedule_key, status, best, date_str, "📅 Meeting")
+                scheduled_slots[reschedule_key] = {"hour": best, "date_str": date_str}
                 mail["status"] = status
+                save_email_state(mail_id, status, [], "📅 Meeting")
 
             else:
-                status = "❌ No slot for reschedule"
-                save_team_state(pkey, status, None, date_str, "📅 Meeting")
+                status = "❌ No alternative slot for reschedule"
+                save_team_state(reschedule_key, status, None, date_str, "📅 Meeting")
                 mail["status"] = status
+                save_email_state(mail_id, status, [], "📅 Meeting")
 
         except Exception as e:
             print(f"Reschedule error: {e}\n{traceback.format_exc()}")
@@ -391,13 +384,77 @@ def _process_single_email(mail, my_email, scheduled_slots):
 
         return
 
-    # ── NORMAL SINGLE-PERSON FLOW ─────────────────────────────
+    # ── TEAM MEETING ──────────────────────────────────────────
+    if is_team_meeting(body) and len(calendar_participants) > 1:
+        mail["tag"] = "📅 Meeting"
 
-    existing = get_email_state(mail_id)
-    if existing:
-        mail["status"] = existing.get("status", "")
-        mail["tag"]    = existing.get("tag", "")
+        pkey = participants_key(calendar_participants)
+
+        # in-memory cache
+        if pkey in scheduled_slots:
+            booked_hour = scheduled_slots[pkey]["hour"]
+            date_str    = scheduled_slots[pkey]["date_str"]
+            status      = f"🤖 Suggested & Booked {booked_hour}:00 on {date_str}"
+            mail["status"] = status
+            save_email_state(mail_id, status, [], "📅 Meeting")
+            return
+
+        # DB check
+        existing = get_team_state(pkey)
+        if existing:
+            booked_hour = existing.get("booked_hour")
+            date_str    = existing.get("date_str", "")
+            status      = existing.get("status", f"🤖 Already booked {booked_hour}:00")
+            mail["status"] = status
+            scheduled_slots[pkey] = {"hour": booked_hour, "date_str": date_str}
+            save_email_state(mail_id, status, [], "📅 Meeting")
+            return
+
+        # Not yet scheduled — find best common slot and book
+        try:
+            date_str = datetime.now(IST).strftime("%Y-%m-%d")
+            common   = find_common_slots(date_str, calendar_participants)
+            best     = suggest_best_slot(common)
+
+            if best:
+                meeting_dt = IST.localize(
+                    datetime.strptime(date_str, "%Y-%m-%d").replace(
+                        hour=best, minute=0, second=0, microsecond=0
+                    )
+                )
+                create_event(
+                    meeting_dt,
+                    attendee_emails=[p for p in calendar_participants if p != my_email]
+                )
+
+                if not is_notification_sender(sender):
+                    send_email(
+                        sender,
+                        "Team Meeting Suggestion",
+                        f"Hi,\n\nBest common slot for all participants:\n\n"
+                        f"👉 {best}:00 on {date_str}\n\n"
+                        f"Meeting has been created in your calendar.\n\nAI Scheduler"
+                    )
+
+                status = f"🤖 Suggested & Booked {best}:00"
+                save_team_state(pkey, status, best, date_str, "📅 Meeting")
+                scheduled_slots[pkey] = {"hour": best, "date_str": date_str}
+                mail["status"] = status
+                save_email_state(mail_id, status, [], "📅 Meeting")
+
+            else:
+                status = "❌ No common slot found"
+                save_team_state(pkey, status, None, date_str, "📅 Meeting")
+                mail["status"] = status
+                save_email_state(mail_id, status, [], "📅 Meeting")
+
+        except Exception as e:
+            print(f"Team meeting error: {e}\n{traceback.format_exc()}")
+            mail["status"] = "⚠️ Team scheduling error"
+
         return
+
+    # ── NORMAL SINGLE-PERSON FLOW ─────────────────────────────
 
     tag        = "📅 Meeting" if is_meeting_related(body) else "📩 General"
     mail["tag"] = tag
@@ -440,13 +497,14 @@ def _process_single_email(mail, my_email, scheduled_slots):
         if alternatives:
             status   = "🟡 Busy (Alternatives sent)"
             alt_text = "\n".join(f"• {a['display']}" for a in alternatives)
-            send_email(
-                sender,
-                "Requested Slot Not Available",
-                f"Hi,\n\nThe time you requested is already booked.\n\n"
-                f"Available alternatives:\n{alt_text}\n\n"
-                f"Please reply with your preferred time.\n\nBest,\nAI Scheduler"
-            )
+            if not is_notification_sender(sender):
+                send_email(
+                    sender,
+                    "Requested Slot Not Available",
+                    f"Hi,\n\nThe time you requested is already booked.\n\n"
+                    f"Available alternatives:\n{alt_text}\n\n"
+                    f"Please reply with your preferred time.\n\nBest,\nAI Scheduler"
+                )
         else:
             status       = "🔴 Busy (No alternatives)"
             alternatives = []
@@ -477,7 +535,6 @@ def get_all_emails():
     except Exception as e:
         print(f"Could not get user email: {e}")
 
-    # In-memory cache for this single request. MongoDB is the persistent guard.
     scheduled_slots = {}
 
     for mail in emails:
@@ -488,7 +545,6 @@ def get_all_emails():
             mail["status"] = "⚠️ Processing error"
             mail["tag"]    = "📩 General"
 
-    # Return today's date so the frontend knows which date to refresh slots for
     today_str = datetime.now(IST).strftime("%Y-%m-%d")
     return jsonify({"emails": emails, "today": today_str})
 

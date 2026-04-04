@@ -35,19 +35,27 @@ def safe_localize(dt):
 def check_availability(start_time):
     """
     Check if the logged-in user's primary calendar is free at start_time.
-    Also checks that the slot is in the future and within working hours (9–18 IST).
+
+    ✅ FIX 1: Reject slots in the past — the Google Calendar API returns no
+    conflicts for past times (they're gone), so without this guard a past slot
+    would incorrectly appear free and get booked.
+
+    ✅ FIX 2: Reject slots outside working hours (before 9 AM or at/after 6 PM).
+
+    ✅ FIX 3: Handle all-day events — they use a 'date' field, not 'dateTime'.
+    The old code skipped them entirely, leaving those days looking free.
     """
     try:
-        service = get_service()
+        service    = get_service()
         start_time = safe_localize(start_time)
-        end_time = start_time + timedelta(hours=1)
+        end_time   = start_time + timedelta(hours=1)
+        now        = datetime.now(IST)
 
-        # ✅ FIX: reject slots in the past
-        now = datetime.now(IST)
+        # Reject past slots
         if start_time <= now:
             return False
 
-        # ✅ FIX: reject slots outside working hours
+        # Reject outside working hours
         if start_time.hour < 9 or start_time.hour >= 18:
             return False
 
@@ -62,11 +70,10 @@ def check_availability(start_time):
             s = event['start'].get('dateTime')
             e = event['end'].get('dateTime')
 
-            # ✅ FIX: handle all-day events — they have 'date' not 'dateTime'
             if not s or not e:
+                # ✅ FIX 3: All-day event — check if it falls on the same day
                 s_date = event['start'].get('date')
                 if s_date:
-                    # All-day event on same day → slot is busy
                     event_day = datetime.strptime(s_date, "%Y-%m-%d").date()
                     if start_time.date() == event_day:
                         return False
@@ -92,31 +99,37 @@ def check_availability(start_time):
 def create_event(start_time, attendee_emails=None):
     """
     Create a 1-hour calendar event.
-    ✅ FIX: skip duplicate creation — if an 'AI Scheduled Meeting' already
-    exists at this exact slot, do not create another one.
+
+    ✅ FIX: Duplicate guard — before inserting, check whether an event already
+    exists that starts at the exact same minute. If so, skip creation silently.
+    This is the last-line defence against double-booking in case the MongoDB
+    guard in app.py is bypassed (e.g. race condition or manual DB wipe).
+
+    ✅ FIX: Only send calendar invites (sendUpdates='all') when there are real
+    attendees. Sending with no attendees is a wasted API call and can produce
+    empty invite emails.
     """
     service    = get_service()
     start_time = safe_localize(start_time)
     end_time   = start_time + timedelta(hours=1)
 
-    # ── Duplicate guard ──────────────────────────────────────────
-    existing = service.events().list(
+    # ── Duplicate guard ──────────────────────────────────────────────────────
+    existing_events = service.events().list(
         calendarId='primary',
         timeMin=start_time.isoformat(),
         timeMax=end_time.isoformat(),
         singleEvents=True
     ).execute().get('items', [])
 
-    for ev in existing:
-        ev_start = ev['start'].get('dateTime')
-        if not ev_start:
+    for ev in existing_events:
+        ev_start_str = ev['start'].get('dateTime')
+        if not ev_start_str:
             continue
-        ev_start_dt = datetime.fromisoformat(ev_start).astimezone(IST)
-        # If any existing event starts at the exact same minute → skip
+        ev_start_dt = datetime.fromisoformat(ev_start_str).astimezone(IST)
         if ev_start_dt == start_time:
-            print(f"create_event: duplicate detected at {start_time}, skipping.")
+            print(f"create_event: duplicate at {start_time} — skipping.")
             return
-    # ─────────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
 
     attendees = [{'email': e} for e in (attendee_emails or []) if e]
 
@@ -130,7 +143,7 @@ def create_event(start_time, attendee_emails=None):
     created = service.events().insert(
         calendarId='primary',
         body=event,
-        sendUpdates='all' if attendees else 'none'   # ✅ FIX: don't send emails if no attendees
+        sendUpdates='all' if attendees else 'none'
     ).execute()
 
     print(f"create_event: created '{created.get('summary')}' at {start_time}")
@@ -142,11 +155,13 @@ def create_event(start_time, attendee_emails=None):
 
 def get_day_slots(date_str):
     """
-    Return hourly slots 9 AM–6 PM for date_str, marking each as busy or free.
-    ✅ FIX: past slots on today are marked busy so they can't be booked.
-    """
-    service = get_service()
+    Return hourly slots 9 AM–6 PM for date_str, marking each free or busy.
 
+    ✅ FIX: Past slots on today are marked busy so they show as red and cannot
+    be clicked. Previously they appeared green because the Calendar API returns
+    no events for times that have already passed.
+    """
+    service      = get_service()
     start_of_day = IST.localize(datetime.strptime(date_str, "%Y-%m-%d"))
     end_of_day   = start_of_day + timedelta(days=1)
     now          = datetime.now(IST)
@@ -166,7 +181,7 @@ def get_day_slots(date_str):
         e = event['end'].get('dateTime')
 
         if not s or not e:
-            # All-day event → mark whole working day busy
+            # All-day event → mark entire working day busy
             s_date = event['start'].get('date')
             if s_date:
                 busy_ranges.append((
@@ -185,8 +200,8 @@ def get_day_slots(date_str):
     while current.hour < 18:
         slot_end = current + timedelta(hours=1)
 
-        # ✅ FIX: mark past slots as busy so they show red and can't be booked
-        is_past = current <= now
+        # ✅ FIX: past slots on today → always busy
+        is_past = (current <= now)
 
         is_busy = is_past or any(
             current < b_end and slot_end > b_start
@@ -195,7 +210,7 @@ def get_day_slots(date_str):
 
         slots.append({
             "display": current.strftime("%I %p"),   # e.g. "11 AM"
-            "time":    current.isoformat(),          # for booking
+            "time":    current.isoformat(),          # ISO string for booking
             "hour":    current.hour,
             "status":  "busy" if is_busy else "free"
         })
@@ -211,8 +226,8 @@ def get_day_slots(date_str):
 
 def suggest_alternatives(start_time):
     """
-    Suggest up to 5 free future slots near start_time.
-    ✅ FIX: also excludes slots outside working hours explicitly.
+    Suggest up to 5 free future slots within 3 days of start_time.
+    Working hours only (9 AM–6 PM). Skips the originally requested slot.
     """
     suggestions = []
     start_time  = safe_localize(start_time)
@@ -244,17 +259,16 @@ def suggest_alternatives(start_time):
 
 # =========================
 # 👥 MULTI-USER AVAILABILITY
-# (uses shared calendars already added to hackathondemo6 account)
 # =========================
 
 def get_multi_user_availability(date, participants):
     """
     Query each participant's calendar via the FreeBusy API.
-    Works because hackathondemo6 has been granted access to
-    pranavmarke66 and only71951 shared calendars.
+    Shared calendars for pranavmarke66 and only71951 have already been granted
+    to hackathondemo6, so their IDs work directly as calendarId values.
 
-    ✅ FIX: past slots are always marked busy so find_common_slots
-    never picks an already-passed hour for the team meeting.
+    ✅ FIX: Past slots are always marked busy without querying the API.
+    This prevents find_common_slots from suggesting a time that has already passed.
     """
     service = get_service()
     start   = IST.localize(datetime.strptime(date, "%Y-%m-%d"))
@@ -272,7 +286,7 @@ def get_multi_user_availability(date, participants):
             slot_start = start.replace(hour=h, minute=0, second=0, microsecond=0)
             slot_end   = slot_start + timedelta(hours=1)
 
-            # ✅ FIX: past slots are always busy — don't even query the API
+            # ✅ FIX: past slots are always busy — skip the API call entirely
             if slot_start <= now:
                 result[user].append({"hour": h, "status": "busy"})
                 continue
@@ -290,7 +304,7 @@ def get_multi_user_availability(date, participants):
 
             except Exception as ex:
                 print(f"freebusy error for {user} at {h}:00 → {ex}")
-                # Can't read their calendar → assume free (don't block the slot)
+                # Cannot read their calendar → treat as free (don't silently block slot)
                 status = "free"
 
             result[user].append({"hour": h, "status": status})
@@ -304,9 +318,9 @@ def get_multi_user_availability(date, participants):
 
 def find_common_slots(date, participants):
     """
-    Return list of hours where ALL participants are free.
-    ✅ FIX: also excludes hours that are already busy on the host's own
-    calendar, so the booked slot is always actually free for the organiser.
+    Return list of hours (9–17) where ALL participants are free.
+    Because hackathondemo6 is included in participants by app.py, the host's
+    own calendar is automatically checked via FreeBusy as well.
     """
     if not participants:
         return []
@@ -341,8 +355,9 @@ def find_common_slots(date, participants):
 
 def suggest_best_slot(common):
     """
-    Pick the best hour from common free slots.
-    Prefers 11 AM–2 PM (inclusive), otherwise takes the earliest available.
+    Pick the best hour from the common free slots.
+    Prefers mid-morning to early afternoon (11 AM–2 PM),
+    otherwise falls back to the earliest available hour.
     """
     if not common:
         return None
