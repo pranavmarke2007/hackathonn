@@ -1,16 +1,18 @@
-import smtplib
+import base64
 from email.mime.text import MIMEText
-from config import EMAIL, PASSWORD
+from calendar_api import get_service
 
 def send_email(to, subject, body):
 
-    msg = MIMEText(body, "plain", "utf-8")
-    msg["Subject"] = subject
-    msg["From"] = EMAIL
-    msg["To"] = to
+    service = get_service()  # uses logged-in user's creds
 
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-        server.login(EMAIL, PASSWORD)
-        server.sendmail(EMAIL, to, msg.as_string())
-        
-        
+    message = MIMEText(body)
+    message['to'] = to
+    message['subject'] = subject
+
+    raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
+
+    service.users().messages().send(
+        userId="me",
+        body={"raw": raw}
+    ).execute()
