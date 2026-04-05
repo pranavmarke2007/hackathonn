@@ -6,7 +6,7 @@ from calendar_api import (
 )
 from db import emails_collection
 from email_sender import send_email
-
+from flask_cors import CORS
 import threading
 import dateparser
 import re
@@ -14,7 +14,7 @@ import pytz
 import traceback
 from datetime import datetime, timedelta
 from config import DEFAULT_TIMEZONE
-
+CREDS = None
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
@@ -24,6 +24,7 @@ import os
 os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
 
 app = Flask(__name__)
+CORS(app)
 app.secret_key = "supersecret"
 
 IST = pytz.timezone(DEFAULT_TIMEZONE)
@@ -98,15 +99,21 @@ def login():
 def callback():
     flow.fetch_token(authorization_response=request.url)
     credentials = flow.credentials
-    session["credentials"] = {
-        "token":         credentials.token,
-        "refresh_token": credentials.refresh_token,
-        "token_uri":     credentials.token_uri,
-        "client_id":     credentials.client_id,
-        "client_secret": credentials.client_secret,
-        "scopes":        credentials.scopes
-    }
-    return redirect("/")
+
+    # session["credentials"] = {
+    #     "token":         credentials.token,
+    #     "refresh_token": credentials.refresh_token,
+    #     "token_uri":     credentials.token_uri,
+    #     "client_id":     credentials.client_id,
+    #     "client_secret": credentials.client_secret,
+    #     "scopes":        credentials.scopes
+    # }
+    global CREDS
+    CREDS = credentials   # 🔥 STORE GLOBALLY
+
+    return redirect("http://localhost:5173/app")
+    # 🔥 CHANGE HERE
+   
 
 
 @app.route("/logout")
@@ -264,7 +271,7 @@ def save_team_state(pkey, status, booked_hour, date_str, tag):
 # 📬 EMAIL PROCESSING
 # =========================
 
-def _process_single_email(mail, my_email, scheduled_slots):
+def _process_single_email(mail, my_email, scheduled_slots, lock):
     """
     Process one email.
     scheduled_slots: in-memory dict { pkey → {"hour": int, "date_str": str} }
@@ -406,7 +413,8 @@ def _process_single_email(mail, my_email, scheduled_slots):
             date_str    = existing.get("date_str", "")
             status      = existing.get("status", f"🤖 Already booked {booked_hour}:00")
             mail["status"] = status
-            scheduled_slots[pkey] = {"hour": booked_hour, "date_str": date_str}
+            with lock:
+                scheduled_slots[pkey] = {"hour": booked_hour, "date_str": date_str}
             save_email_state(mail_id, status, [], "📅 Meeting")
             return
 
@@ -438,7 +446,8 @@ def _process_single_email(mail, my_email, scheduled_slots):
 
                 status = f"🤖 Suggested & Booked {best}:00"
                 save_team_state(pkey, status, best, date_str, "📅 Meeting")
-                scheduled_slots[pkey] = {"hour": best, "date_str": date_str}
+                with lock:    
+                    scheduled_slots[pkey] = {"hour": best, "date_str": date_str}
                 mail["status"] = status
                 save_email_state(mail_id, status, [], "📅 Meeting")
 
@@ -519,35 +528,61 @@ def _process_single_email(mail, my_email, scheduled_slots):
 
 @app.route("/emails")
 def get_all_emails():
+    global CREDS
 
-    if "credentials" not in session:
-        return jsonify([])
+    if CREDS is None:
+        print("❌ No credentials found")
+        return jsonify({"emails": []})
 
     try:
-        emails = fetch_emails_from_gmail(session["credentials"])
+        emails = fetch_emails_from_gmail({
+            "token": CREDS.token,
+            "refresh_token": CREDS.refresh_token,
+            "token_uri": CREDS.token_uri,
+            "client_id": CREDS.client_id,
+            "client_secret": CREDS.client_secret,
+            "scopes": CREDS.scopes
+        })
+        print("✅ FETCHED:", emails)
+
     except Exception as e:
         print(f"FATAL fetch_emails_from_gmail: {e}\n{traceback.format_exc()}")
-        return jsonify([])
+        return jsonify({"emails": []})
 
     my_email = None
     try:
-        my_email = get_user_email()
+        my_email = get_my_email({
+            "token": CREDS.token,
+            "refresh_token": CREDS.refresh_token,
+            "token_uri": CREDS.token_uri,
+            "client_id": CREDS.client_id,
+            "client_secret": CREDS.client_secret,
+            "scopes": CREDS.scopes
+        })
     except Exception as e:
         print(f"Could not get user email: {e}")
 
     scheduled_slots = {}
+    threads = []
+    lock = threading.Lock()
 
     for mail in emails:
-        try:
-            _process_single_email(mail, my_email, scheduled_slots)
-        except Exception as e:
-            print(f"Unexpected error on {mail.get('id')}: {e}\n{traceback.format_exc()}")
-            mail["status"] = "⚠️ Processing error"
-            mail["tag"]    = "📩 General"
+        t = threading.Thread(
+            target=_process_single_email,
+            args=(mail, my_email, scheduled_slots, lock)
+        )
+        t.start()
+        threads.append(t)
+
+    for t in threads:
+        t.join()
 
     today_str = datetime.now(IST).strftime("%Y-%m-%d")
-    return jsonify({"emails": emails, "today": today_str})
 
+    return jsonify({
+        "emails": emails,
+        "today": today_str
+    })
 
 # =========================
 # 📅 DAY SLOTS
